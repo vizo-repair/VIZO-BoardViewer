@@ -1,0 +1,89 @@
+﻿name: Release Single-File Builds
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-latest
+            binary: VIZO.BoardViewer.exe
+            asset: VIZO.BoardViewer-win-x64.exe
+          - rid: osx-arm64
+            os: macos-latest
+            binary: VIZO.BoardViewer
+            asset: VIZO.BoardViewer-osx-arm64.tar.gz
+          - rid: linux-x64
+            os: ubuntu-latest
+            binary: VIZO.BoardViewer
+            asset: VIZO.BoardViewer-linux-x64.tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish (${{ matrix.rid }})
+        run: >
+          dotnet publish VIZO.BoardViewer.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:DebugType=none
+          -p:DebugSymbols=false
+          -o publish/${{ matrix.rid }}
+
+      - name: Package Windows binary
+        if: matrix.rid == 'win-x64'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "publish/${{ matrix.rid }}/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+
+      - name: Package Unix binary
+        if: matrix.rid != 'win-x64'
+        shell: bash
+        run: |
+          mkdir -p dist
+          chmod +x "publish/${{ matrix.rid }}/${{ matrix.binary }}"
+          tar -czf "dist/${{ matrix.asset }}" -C "publish/${{ matrix.rid }}" "${{ matrix.binary }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*
