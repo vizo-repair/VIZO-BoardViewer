@@ -718,6 +718,14 @@ function setupActions() {
         if (file) await loadBoardview(file);
         e.target.value = '';
     });
+
+    initDesktopLifecycleStream();
+}
+
+function initDesktopLifecycleStream() {
+    if (typeof EventSource === 'undefined') return;
+    const source = new EventSource('/api/lifecycle/stream');
+    window.addEventListener('beforeunload', () => source.close());
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initViewer);

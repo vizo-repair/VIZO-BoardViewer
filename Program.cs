@@ -66,10 +66,44 @@ var isContainer = string.Equals(
     "true",
     StringComparison.OrdinalIgnoreCase);
 
+var autoShutdownEnabled = !app.Environment.IsDevelopment() && !isContainer && !noBrowser && !useLan;
+var lifecycle = autoShutdownEnabled ? new BrowserLifecycleTracker(app.Lifetime) : null;
+
+app.MapGet("/api/lifecycle/stream", async (HttpContext context) =>
+{
+    if (lifecycle is null)
+    {
+        return Results.NoContent();
+    }
+
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+    await context.Response.WriteAsync(": connected\n\n", context.RequestAborted);
+    await context.Response.Body.FlushAsync(context.RequestAborted);
+
+    lifecycle.ClientConnected();
+    try
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, context.RequestAborted);
+    }
+    catch (OperationCanceledException)
+    {
+        // Browser tab closed or reloaded
+    }
+    finally
+    {
+        lifecycle.ClientDisconnected();
+    }
+
+    return Results.Empty;
+});
+
 if (!app.Environment.IsDevelopment() && !isContainer && !noBrowser)
 {
     app.Lifetime.ApplicationStarted.Register(() =>
     {
+        lifecycle?.ArmInitialTimeout();
+
         var server = app.Services.GetRequiredService<IServer>();
         var address = server.Features.Get<IServerAddressesFeature>()?.Addresses.FirstOrDefault();
         if (string.IsNullOrWhiteSpace(address))
@@ -108,5 +142,89 @@ static void OpenBrowser(string url, ILogger logger)
     catch (Exception ex)
     {
         logger.LogWarning(ex, "Could not automatically open browser at {Url}. Open it manually.", url);
+    }
+}
+
+sealed class BrowserLifecycleTracker(IHostApplicationLifetime lifetime)
+{
+    private readonly Lock _gate = new();
+    private int _activeConnections;
+    private bool _hasEverConnected;
+    private CancellationTokenSource? _shutdownCts;
+
+    public void ArmInitialTimeout()
+    {
+        ScheduleShutdown(TimeSpan.FromSeconds(60), onlyIfNeverConnected: true);
+    }
+
+    public void ClientConnected()
+    {
+        lock (_gate)
+        {
+            _hasEverConnected = true;
+            _activeConnections++;
+            _shutdownCts?.Cancel();
+            _shutdownCts?.Dispose();
+            _shutdownCts = null;
+        }
+    }
+
+    public void ClientDisconnected()
+    {
+        lock (_gate)
+        {
+            _activeConnections = Math.Max(0, _activeConnections - 1);
+            if (_activeConnections == 0)
+            {
+                ScheduleShutdownLocked(TimeSpan.FromSeconds(6), onlyIfNeverConnected: false);
+            }
+        }
+    }
+
+    private void ScheduleShutdown(TimeSpan delay, bool onlyIfNeverConnected)
+    {
+        lock (_gate)
+        {
+            ScheduleShutdownLocked(delay, onlyIfNeverConnected);
+        }
+    }
+
+    private void ScheduleShutdownLocked(TimeSpan delay, bool onlyIfNeverConnected)
+    {
+        _shutdownCts?.Cancel();
+        _shutdownCts?.Dispose();
+
+        var cts = new CancellationTokenSource();
+        _shutdownCts = cts;
+        var token = cts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay, token);
+                lock (_gate)
+                {
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    if (onlyIfNeverConnected && _hasEverConnected)
+                    {
+                        return;
+                    }
+
+                    if (_activeConnections == 0)
+                    {
+                        lifetime.StopApplication();
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancelled by new connection
+            }
+        }, CancellationToken.None);
     }
 }
