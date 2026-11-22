@@ -5,7 +5,7 @@ Standalone, free, open-source **Boardview viewer** built with **ASP.NET Core (.N
 - **Try Online:** [VIZO BoardViewer Online](https://vizo.repair/en/boardview-online) — instant browser-based viewer with no installation required.
 - **Main Project:** Part of the [VIZO Repair Platform](https://vizo.repair/en) — schematics, boardviews, and repair diagnostics ecosystem.
 
-[![VIZO BoardViewer — PCB boardview viewer displaying a motherboard (.fz) with color-coded components and Hover HUD](docs/vizo-boardview.jpg)](https://vizo.repair/en/boardview-online)
+[![VIZO Online Boardview Viewer — free PCB boardview viewer displaying a motherboard (.fz) with color-coded components and Hover HUD](docs/vizo-boardview.jpg "VIZO Online Boardview Viewer")](https://vizo.repair/en/boardview-online)
 
 ---
 
