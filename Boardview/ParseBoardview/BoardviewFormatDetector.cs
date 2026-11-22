@@ -9,16 +9,24 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using VIZO.BoardViewer.Boardview.ParseBoardview.Formats;
+using VIZO.BoardViewer.Boardview.ParseBoardview.Services;
 
 public class BoardviewFormatDetector
 {
     public static readonly TimeSpan ParseTimeout = TimeSpan.FromSeconds(45);
 
     private readonly IEnumerable<IBoardviewFormatParser> _parsers;
+    private readonly ComponentRoleDeducer _roleDeducer;
+    private readonly BoardviewPrefixCatalog _catalog;
 
-    public BoardviewFormatDetector(IEnumerable<IBoardviewFormatParser> parsers)
+    public BoardviewFormatDetector(
+        IEnumerable<IBoardviewFormatParser> parsers,
+        ComponentRoleDeducer? roleDeducer = null,
+        BoardviewPrefixCatalog? catalog = null)
     {
         _parsers = parsers;
+        _roleDeducer = roleDeducer ?? new ComponentRoleDeducer();
+        _catalog = catalog ?? BoardviewPrefixCatalog.Default;
     }
 
     public BoardviewNetlistDto? DetectAndParse(byte[] fileBytes, string fileName, Action<string>? onLog = null, CancellationToken ct = default)
@@ -125,6 +133,7 @@ public class BoardviewFormatDetector
                 var dto = selectedParser.Parse(fileBytes, fileName, onLog, ct);
                 if (dto != null && dto.Components != null && dto.Components.Count > 0)
                 {
+                    NormalizePinAwareRoles(dto);
                     onLog?.Invoke($"✅ [BoardviewDetector] SUCCESS! [{selectedParser.FormatName}] parsed {dto.Components.Count} components, {dto.Nets.Count} nets.");
                     return dto;
                 }
@@ -237,5 +246,44 @@ public class BoardviewFormatDetector
         }
 
         return false;
+    }
+
+    private void NormalizePinAwareRoles(BoardviewNetlistDto dto)
+    {
+        if (dto.Components == null || dto.Components.Count == 0)
+            return;
+
+        foreach (string refDes in dto.Components.Keys.ToList())
+        {
+            var comp = dto.Components[refDes];
+            if (comp == null || string.IsNullOrWhiteSpace(refDes))
+                continue;
+
+            int pinsCount = comp.PinsCount > 0 ? comp.PinsCount : comp.Pins?.Count ?? 0;
+            string resolved;
+
+            if (pinsCount > 0 && _catalog.TryLookupConfident(refDes, pinsCount, out var confKind))
+            {
+                resolved = confKind.ToCanonicalName();
+            }
+            else if (pinsCount > 0 && _catalog.TryLookupFallback(refDes, pinsCount, out var fbKind))
+            {
+                resolved = fbKind.ToCanonicalName();
+            }
+            else
+            {
+                string deduced = pinsCount > 0
+                    ? _roleDeducer.RefineRoleWithPinCount(refDes, comp.Type, pinsCount)
+                    : _roleDeducer.DeduceRole(refDes, comp.Type, pinsCount);
+                resolved = ComponentKinds.TryParse(deduced, out var parsedKind)
+                    ? parsedKind.ToCanonicalName()
+                    : ComponentKind.Unknown.ToCanonicalName();
+            }
+
+            if (!string.Equals(resolved, comp.Type, StringComparison.Ordinal))
+            {
+                dto.Components[refDes] = comp with { Type = resolved };
+            }
+        }
     }
 }

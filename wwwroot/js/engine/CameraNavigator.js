@@ -123,8 +123,16 @@ export class CameraNavigator {
         }
     }
 
+    static cancelGlide() {
+        if (animFrameId) {
+            cancelAnimationFrame(animFrameId);
+            animFrameId = null;
+            CanvasStore.setInteracting(false);
+        }
+    }
+
     static animateGlide(fromScale, fromPanX, fromPanY, toScale, toPanX, toPanY, engine) {
-        if (animFrameId) cancelAnimationFrame(animFrameId);
+        this.cancelGlide();
 
         const startTime = performance.now();
         const duration = 320;

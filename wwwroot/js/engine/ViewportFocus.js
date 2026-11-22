@@ -1,5 +1,5 @@
 // Visible-canvas focus point: center a part in the area not covered by the
-// bottom dock and left toolbar, instead of the geometric screen center.
+// bottom dock, net inspector HUD, and left toolbar, instead of geometric center.
 
 const FOCUS_PAD = 12;
 const MIN_FOCUS_SPAN = 48;
@@ -11,16 +11,6 @@ function isOverlayVisible(el) {
     if (Number.parseFloat(cs.opacity) === 0) return false;
     const r = el.getBoundingClientRect();
     return r.width > 1 && r.height > 1;
-}
-
-// While the card-body collapse transition is running, pretend the body is
-// already gone so fly-to frames the part above the collapsed dock.
-function dockOcclusionTop(dock) {
-    const top = dock.getBoundingClientRect().top;
-    const card = document.getElementById('card-mode');
-    if (!card?.classList.contains('is-collapsed')) return top;
-    const body = document.getElementById('card-body');
-    return body ? top + Math.max(0, body.getBoundingClientRect().height) : top;
 }
 
 function clampFocusSpan(start, end, max, minSpan) {
@@ -41,13 +31,20 @@ export function getVisibleFocusCenter(container) {
     let right = cw;
     let bottom = ch;
 
-    const dock = document.getElementById('bottom-dock-container');
-    if (isOverlayVisible(dock)) {
-        const d = dock.getBoundingClientRect();
-        const localTop = dockOcclusionTop(dock) - cRect.top;
-        const localBottom = d.bottom - cRect.top;
-        if (localTop < ch && localBottom > 0) {
-            bottom = Math.min(bottom, localTop - FOCUS_PAD);
+    const netHud = document.getElementById('net-inspector-hud');
+    if (isOverlayVisible(netHud)) {
+        const n = netHud.getBoundingClientRect();
+        const localLeft = n.left - cRect.left;
+        const localRight = n.right - cRect.left;
+        const localTop = n.top - cRect.top;
+        const localBottom = n.bottom - cRect.top;
+
+        if (localRight > 0 && localLeft < cw && localBottom > 0 && localTop < ch) {
+            if (localLeft >= cw * 0.52 && n.width <= cw * 0.42) {
+                right = Math.min(right, localLeft - FOCUS_PAD);
+            } else {
+                bottom = Math.min(bottom, localTop - FOCUS_PAD);
+            }
         }
     }
 

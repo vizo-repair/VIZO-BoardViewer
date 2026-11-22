@@ -11,6 +11,7 @@ public static class BoardviewServiceExtensions
     public static IServiceCollection AddBoardviewViewer(this IServiceCollection services)
     {
         services.AddSingleton<ComponentRoleDeducer>();
+        services.AddSingleton<BoardviewPrefixCatalog>(_ => BoardviewPrefixCatalog.Default);
         services.AddSingleton<QuadrantAnchorScorer>();
         services.AddSingleton<NetlistSanitizer>();
 

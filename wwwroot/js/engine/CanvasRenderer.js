@@ -68,7 +68,7 @@ export function getImageRenderRect(container) {
     return cachedRect;
 }
 
-export function drawFrame(ctx, canvas, container, requestRender) {
+export function drawFrame(ctx, canvas, container, requestRender, overlayOptions = null) {
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -109,7 +109,9 @@ export function drawFrame(ctx, canvas, container, requestRender) {
                 opacity: 1.0,
                 isDragging: !!isInteracting,
                 quadBroken: false,
-                fx: null
+                fx: null,
+                inspectedNet: CanvasStore.inspectedNet,
+                hoverHit: overlayOptions?.hoverHit || null
             }
         );
     }

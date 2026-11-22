@@ -9,7 +9,7 @@
 
     <!-- Styles -->
     <link rel="stylesheet" href="/css/tailwind.css?v=17">
-    <link rel="stylesheet" href="/css/glass.css?v=23">
+    <link rel="stylesheet" href="/css/glass.css?v=25">
 </head>
 <body class="workbench-mode text-white w-screen h-screen overflow-hidden bg-[#07090e] select-none flex flex-col justify-between">
 
@@ -23,6 +23,12 @@
         <div id="table-transform-layer" class="w-full h-full transform-gpu pointer-events-none relative bg-transparent z-10"></div>
 
         <canvas id="table-draw-canvas" class="absolute inset-0 w-full h-full z-20 pointer-events-auto"></canvas>
+        <div id="canvas-zoom-controls" class="canvas-zoom-controls" role="group" aria-label="Zoom controls">
+            <button type="button" data-zoom="out" aria-label="Zoom out" title="Zoom out">−</button>
+            <output data-zoom-value>100%</output>
+            <button type="button" data-zoom="in" aria-label="Zoom in" title="Zoom in">+</button>
+            <button type="button" data-zoom="fit" title="Fit board">Fit</button>
+        </div>
     </div>
 
     <!-- 📂 DRAG & DROP MODAL -->
@@ -338,6 +344,6 @@
     <button type="button" id="btn-zen-exit" data-action="toggleZenMode" class="fixed top-3 right-3 z-50 p-2.5 glass rounded-full border border-white/20 text-cyan-300 shadow-2xl transition opacity-0 pointer-events-none cursor-pointer flex items-center justify-center hover:scale-110" data-i18n-title="btnShowInterfaceTitle" title="Show UI">
         <span class="material-symbols-outlined text-base">visibility</span>
     </button>
-    <script type="module" src="/js/boardview-main.js?v=6"></script>
+    <script type="module" src="/js/boardview-main.js?v=7"></script>
 </body>
 </html>

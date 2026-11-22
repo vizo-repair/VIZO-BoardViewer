@@ -56,6 +56,14 @@ public static class ParseBoardviewEndpoint
             {
                 return Results.Json(new { error = "Boardview parsing timed out or was canceled." }, statusCode: 408);
             }
+            catch (NotSupportedException ex)
+            {
+                logger.LogWarning(ex, "[Boardview] Unsupported format: {Message}", ex.Message);
+                string message = string.Equals(ex.Message, "errCadenceAllegroBrd", StringComparison.OrdinalIgnoreCase)
+                    ? "This file is a native Cadence Allegro project (.brd). Please use a boardview export in .cad or .bdv format."
+                    : (!string.IsNullOrWhiteSpace(ex.Message) ? ex.Message : "Unsupported Boardview format.");
+                return Results.Json(new { error = message }, statusCode: 400);
+            }
             catch (Exception ex)
             {
                 logger.LogError(ex, "[Boardview] Failed to parse boardview file");

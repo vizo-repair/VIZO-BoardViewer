@@ -1,5 +1,5 @@
 ﻿// =========================================================================
-// VIZO 2.0 - state/CanvasStore.js
+// VIZO BoardViewer - state/CanvasStore.js
 // =========================================================================
 import { AppEvents } from './EventBus.js';
 
@@ -9,7 +9,8 @@ const state = {
     tablePanX: 0,
     tablePanY: 0,
     isInteracting: false,
-    focusedHighlight: null
+    focusedHighlight: null,
+    inspectedNet: null
 };
 
 export const CanvasStore = {
@@ -24,28 +25,39 @@ export const CanvasStore = {
     get panY() { return state.tablePanY; },
 
     setTransform(scale, panX, panY) {
+        const scaleChanged = scale !== state.tableScale;
         state.tableScale = scale;
         state.tablePanX = panX;
         state.tablePanY = panY;
+        if (scaleChanged) AppEvents.emit('canvas:scaleChanged', state.tableScale);
     },
 
     resetTransform() {
+        const scaleChanged = state.tableScale !== 1.0;
         state.tableScale = 1.0;
         state.tablePanX = 0;
         state.tablePanY = 0;
+        if (scaleChanged) AppEvents.emit('canvas:scaleChanged', state.tableScale);
     },
 
     get focusedHighlight() { return state.focusedHighlight; },
     setFocusedHighlight(h) { state.focusedHighlight = h; },
     clearFocusedHighlight() { state.focusedHighlight = null; },
 
+    get inspectedNet() { return state.inspectedNet; },
+    setInspectedNet(info) { state.inspectedNet = info || null; },
+    clearInspectedNet() { state.inspectedNet = null; },
+
     reset() {
+        const scaleChanged = state.tableScale !== 1.0;
         state.currentTool = 'pan';
         state.tableScale = 1.0;
         state.tablePanX = 0;
         state.tablePanY = 0;
         state.isInteracting = false;
         state.focusedHighlight = null;
+        state.inspectedNet = null;
+        if (scaleChanged) AppEvents.emit('canvas:scaleChanged', state.tableScale);
     }
 };
 

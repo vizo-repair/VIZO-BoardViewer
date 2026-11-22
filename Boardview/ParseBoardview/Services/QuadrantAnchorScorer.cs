@@ -1,6 +1,6 @@
 ﻿// ============================================================================
-// FILE: Features/Boardview/ParseBoardview/Services/QuadrantAnchorScorer.cs
-// Deterministic selection of 4 fiducial anchors (Max Quadrilateral Area + Anti-Clustering)
+// FILE: Boardview/ParseBoardview/Services/QuadrantAnchorScorer.cs
+// Deterministic selection of 4 landmarks (Max Quadrilateral Area + Anti-Clustering)
 // ============================================================================
 namespace VIZO.BoardViewer.Boardview.ParseBoardview.Services;
 
@@ -20,7 +20,7 @@ public class QuadrantAnchorScorer
         if (components == null || components.Count == 0) return result;
 
         double boardDiagonal = Math.Sqrt(Math.Pow(bounds.Width, 2) + Math.Pow(bounds.Height, 2));
-        double minDistance = Math.Max(0.5, boardDiagonal * 0.28); // Disallow points closer than 28% of board diagonal
+        double minDistance = Math.Max(0.5, boardDiagonal * 0.28);
 
         foreach (var side in new[] { "TOP", "BOTTOM" })
         {
@@ -71,7 +71,6 @@ public class QuadrantAnchorScorer
 
             if (eligible.Count < 4) continue;
 
-            // Find 4 points in 4 different extreme quadrants of the board outline
             double midX = (bounds.MinX + bounds.MaxX) / 2.0;
             double midY = (bounds.MinY + bounds.MaxY) / 2.0;
 
@@ -97,7 +96,6 @@ public class QuadrantAnchorScorer
             if (qBR != null && !selectedList.Any(s => Distance(s.Pin1X, s.Pin1Y, qBR.Pin1X, qBR.Pin1Y) < minDistance)) selectedList.Add(qBR);
             if (qBL != null && !selectedList.Any(s => Distance(s.Pin1X, s.Pin1Y, qBL.Pin1X, qBL.Pin1Y) < minDistance)) selectedList.Add(qBL);
 
-            // Fill in remaining points with distance check
             foreach (var cand in eligible.OrderByDescending(c => c.Quality))
             {
                 if (selectedList.Count >= 4) break;
@@ -132,9 +130,22 @@ public class QuadrantAnchorScorer
 
     private static bool IsEligibleLandmarkComponent(string refDes, BoardviewComponentDto comp)
     {
-        string u = refDes.ToUpperInvariant();
-
         if (BgaExclusionFilter.IsExcludedBgaOrConnector(refDes, comp)) return false;
+
+        if (ComponentKinds.TryParse(comp.Type, out var kind) && kind != ComponentKind.Unknown)
+        {
+            if (ComponentKinds.IsExcludedFromLandmarks(kind)) return false;
+            if (kind is ComponentKind.PowerIc or ComponentKind.Ic or ComponentKind.Transistor or ComponentKind.Optocoupler)
+                return comp.PinsCount >= 3 && comp.PinsCount <= 48;
+            if (kind == ComponentKind.Capacitor && (comp.Type.Contains("Polarized", StringComparison.OrdinalIgnoreCase)
+                || refDes.StartsWith("PC", StringComparison.OrdinalIgnoreCase)
+                || refDes.StartsWith("TC", StringComparison.OrdinalIgnoreCase)
+                || refDes.StartsWith("EC", StringComparison.OrdinalIgnoreCase)))
+                return true;
+            return false;
+        }
+
+        string u = refDes.ToUpperInvariant();
         if (u.StartsWith("J") || u.StartsWith("CN") || u.StartsWith("H") || u.StartsWith("MH") || u.StartsWith("TP")) return false;
 
         if (u.StartsWith("PC") || u.StartsWith("TC") || comp.Type.Contains("Polarized", StringComparison.OrdinalIgnoreCase))
@@ -151,6 +162,14 @@ public class QuadrantAnchorScorer
 
     private static double GetQualityScore(string refDes, BoardviewComponentDto comp)
     {
+        if (ComponentKinds.TryParse(comp.Type, out var kind) && kind != ComponentKind.Unknown)
+        {
+            if (kind == ComponentKind.PowerIc || (kind == ComponentKind.Ic && comp.PinsCount >= 8)) return 1.5;
+            if (kind == ComponentKind.Transistor) return 1.2;
+            if (kind == ComponentKind.Capacitor) return 1.0;
+            return 0.8;
+        }
+
         string u = refDes.ToUpperInvariant();
         if (u.StartsWith("PU") || u.StartsWith("UE") || (u.StartsWith("U") && comp.PinsCount >= 8)) return 1.5;
         if (u.StartsWith("PQ") || u.StartsWith("QA") || u.StartsWith("Q")) return 1.2;

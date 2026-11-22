@@ -5,13 +5,14 @@ import { AppState, AppEvents } from './state/AppState.js';
 import { CanvasStore } from './state/CanvasStore.js';
 import { CanvasEngine } from './engine/CanvasEngine.js';
 import { NetInspectorController } from './engine/NetInspectorController.js';
+import { COMPONENT_KINDS, getComponentKind, isIcKind, isConnectorKind } from './engine/ComponentKind.js';
 import { DualSideController } from './ui/DualSideController.js';
 import { CameraNavigator } from './engine/CameraNavigator.js';
 import { parseBoardviewFile } from './api/BoardviewApi.js';
 import { findNearestCadComponent } from './engine/SnapEngine.js';
 import { getImageRenderRect } from './engine/CanvasRenderer.js';
 import { getEffectiveMatrix, rotateStandaloneCad, flipStandaloneCad } from './engine/BoardCorners.js';
-import { formatBoardSide } from './ui/i18n/DisplayLabels.js';
+import { formatBoardSide, formatComponentRole } from './ui/i18n/DisplayLabels.js';
 import { showAppToast } from './ui/ToastNotification.js';
 import { escapeHtml } from './ui/HtmlSanitizer.js';
 import { t, userFacingError } from './ui/i18n/I18nStore.js';
@@ -36,10 +37,8 @@ async function initViewer() {
     engine = new CanvasEngine(canvasEl, containerEl);
     CameraNavigator.init(engine);
 
-    // 4. Render Net Inspector in the render loop
-    const origRender = engine.renderImmediate.bind(engine);
-    engine.renderImmediate = function () {
-        origRender();
+    // 4. Render Net Inspector in the render loop (before hover tooltip)
+    engine.afterFrameRender = function () {
         if (inspector.selectedNet) {
             const currentSide = (AppState.activeSide || 'TOP').toUpperCase();
             const matrix = getEffectiveMatrix(AppState.boardviewNetlist, currentSide, AppState.getActiveMatrix());
@@ -422,8 +421,12 @@ function renderSpotlightResults(query, forcedCategory = null) {
         if (netlist.components) {
             for (const [refDes, comp] of Object.entries(netlist.components)) {
                 const u = refDes.toUpperCase();
-                if (u.startsWith('PU') || u.startsWith('U') || u.startsWith('UE') || u.startsWith('UA') || (comp.type && comp.type.includes('IC'))) {
-                    results.push({ type: 'component', refDes: refDes, role: comp.type || 'IC', side: (comp.side || 'TOP').toUpperCase().startsWith('B') ? 'BOTTOM' : 'TOP' });
+                const kind = getComponentKind(comp);
+                const matched = kind !== COMPONENT_KINDS.UNKNOWN
+                    ? isIcKind(kind)
+                    : (u.startsWith('PU') || u.startsWith('U') || u.startsWith('UE') || u.startsWith('UA'));
+                if (matched) {
+                    results.push({ type: 'component', refDes: refDes, role: comp.type || 'Ic', side: (comp.side || 'TOP').toUpperCase().startsWith('B') ? 'BOTTOM' : 'TOP' });
                     if (results.length >= 25) break;
                 }
             }
@@ -432,7 +435,11 @@ function renderSpotlightResults(query, forcedCategory = null) {
         if (netlist.components) {
             for (const [refDes, comp] of Object.entries(netlist.components)) {
                 const u = refDes.toUpperCase();
-                if (u.startsWith('J') || u.startsWith('CN') || (comp.type && comp.type.includes('Connector'))) {
+                const kind = getComponentKind(comp);
+                const matched = kind !== COMPONENT_KINDS.UNKNOWN
+                    ? isConnectorKind(kind)
+                    : (u.startsWith('J') || u.startsWith('CN'));
+                if (matched) {
                     results.push({ type: 'component', refDes: refDes, role: comp.type || 'Connector', side: (comp.side || 'TOP').toUpperCase().startsWith('B') ? 'BOTTOM' : 'TOP' });
                     if (results.length >= 25) break;
                 }
@@ -490,7 +497,7 @@ function renderSpotlightResults(query, forcedCategory = null) {
                     <div class="flex items-center gap-2">
                         <span class="text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30 font-mono">${escapeHtml(t('spotlightCompBadge', 'PART'))}</span>
                         <strong class="text-xs font-mono font-bold">${escapeHtml(item.refDes)}</strong>
-                        <span class="text-[10px] text-gray-400">${escapeHtml(item.role)}</span>
+                        <span class="text-[10px] text-gray-400">${escapeHtml(formatComponentRole(item.role))}</span>
                     </div>
                     <span class="text-[10px] font-mono font-bold text-gray-400">${escapeHtml(formatBoardSide(item.side, { short: true }))}</span>
                 </div>

@@ -1,19 +1,32 @@
 ﻿// ============================================================================
-// FILE: wwwroot/js/engine/NetInspectorController.js (VIZO 2.0 CAD Inspector)
-// Physically accurate analysis: Shunts to GND, Power Sources, Load
+// FILE: wwwroot/js/engine/NetInspectorController.js (VIZO BoardViewer CAD Inspector)
+// Shunts to GND, Power Sources, Active Loads, Real Tracks, Ratsnest, X-Ray Ghost
 // ============================================================================
 import { AppState } from '../state/AppState.js';
+import { CanvasStore } from '../state/CanvasStore.js';
 import { transformPoint, resolvePinCadCoords } from './HomographySolver.js';
-import { formatBoardSide } from '../ui/i18n/DisplayLabels.js';
-import { t } from '../ui/i18n/I18nStore.js';
+import {
+    COMPONENT_KINDS,
+    getComponentKind,
+    isIcKind,
+    isTransistorKind,
+    isInductorKind,
+    isConnectorKind,
+    isNonShuntKind,
+    isActiveComponentKind,
+    isGroundNet
+} from './ComponentKind.js';
 
 const FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+const MAX_RATSNEST_NODES = 45;
+const MAX_GND_XRAY_NODES = 80;
 
 export class NetInspectorController {
     constructor() {
         this.selectedNet = null;
         this.activeFilter = 'ALL';
         this.inspectedNodes = [];
+        this.netTracks = [];
         this.oppositeNodesCount = 0;
         this.selectedRefDes = null;
         this.selectedPinNum = null;
@@ -23,9 +36,37 @@ export class NetInspectorController {
         this.selectedNet = null;
         this.activeFilter = 'ALL';
         this.inspectedNodes = [];
+        this.netTracks = [];
         this.oppositeNodesCount = 0;
         this.selectedRefDes = null;
         this.selectedPinNum = null;
+        CanvasStore.clearInspectedNet();
+    }
+
+    syncCanvasStore() {
+        if (!this.selectedNet) {
+            CanvasStore.clearInspectedNet();
+            return;
+        }
+        const componentRefs = new Set();
+        const isShuntFilter = this.activeFilter === 'SHUNTS';
+        const isSourceFilter = this.activeFilter === 'SOURCES';
+
+        for (const node of this.inspectedNodes) {
+            if (isShuntFilter && !this.isShuntNode(node.role)) continue;
+            if (isSourceFilter && node.role !== 'SOURCE') continue;
+            if (node.refDes) componentRefs.add(node.refDes.toUpperCase());
+        }
+        if (this.selectedRefDes) {
+            componentRefs.add(this.selectedRefDes.toUpperCase());
+        }
+
+        CanvasStore.setInspectedNet({
+            netName: this.selectedNet,
+            isGnd: this.isGroundNet(this.selectedNet),
+            activeFilter: this.activeFilter,
+            componentRefs
+        });
     }
 
     selectNet(netName, netlist, activeSide = 'TOP', originPin = null) {
@@ -55,6 +96,7 @@ export class NetInspectorController {
 
         this.selectedNet = cleanNet;
         this.inspectedNodes = [];
+        this.netTracks = [];
         this.oppositeNodesCount = 0;
 
         if (originPin) {
@@ -69,7 +111,7 @@ export class NetInspectorController {
         const seenKeys = new Set();
         const isSelectedNetGnd = this.isGroundNet(cleanNet);
 
-        // Build a fast Set of all board pins connected to any ground net
+        // Build fast lookup of all pins connected to any GND net
         const gndPinsSet = new Set();
         if (netlist.nets) {
             for (const [nName, pins] of Object.entries(netlist.nets)) {
@@ -97,7 +139,6 @@ export class NetInspectorController {
             const comp = netlist.components?.[pinInfo.refDes] ||
                 Object.entries(netlist.components || {}).find(([k]) => k.equalsIgnoreCase(pinInfo.refDes))?.[1];
 
-            // Physical node role calculation checking platform prefixes and second pin to GND
             const role = this.deduceNodeRole(pinInfo.refDes, comp, pinInfo.pinNum, cleanNet, gndPinsSet);
 
             this.inspectedNodes.push({
@@ -137,48 +178,56 @@ export class NetInspectorController {
             });
         }
 
+        // Collect real copper traces for this net if present in Boardview
+        if (!isSelectedNetGnd && Array.isArray(netlist.tracks) && netlist.tracks.length > 0) {
+            for (const tr of netlist.tracks) {
+                if (!tr?.net || !Array.isArray(tr.path) || tr.path.length < 2) continue;
+                if (tr.net.trim().toUpperCase() === upperNet) {
+                    this.netTracks.push(tr);
+                }
+            }
+        }
+
+        this.syncCanvasStore();
         return this.getSummary();
     }
 
-    /**
-     * Circuit-level role deduction for a pin
-     */
     deduceNodeRole(refDes, comp, pinNum, netName, gndPinsSet = null) {
         const uRef = refDes.toUpperCase();
         const uNet = (netName || '').toUpperCase();
         const pinData = comp?.pins?.[pinNum];
         const pinName = (pinData?.name || pinNum || '').toUpperCase();
 
-        // 1. TRUE SHUNT TO GROUND (GND)
-        // If the selected net itself is ground, there can be no shunts
+        // 1. Shunt to GND
         const isNetGnd = this.isGroundNet(uNet);
         const hasGndPin = !isNetGnd && this.hasGroundPin(uRef, comp, pinNum, gndPinsSet);
 
         const pinCount = comp?.pinsCount > 0 ? comp.pinsCount : Object.keys(comp?.pins || {}).length;
-        const isConnector = (comp?.type && /connector|socket|jack|header/i.test(comp.type)) ||
-            uRef.startsWith('J') || uRef.startsWith('CN') || uRef.startsWith('CON') || uRef.startsWith('BAT');
+        const kind = getComponentKind(comp);
+        const isConnector = kind !== COMPONENT_KINDS.UNKNOWN
+            ? isConnectorKind(kind)
+            : (uRef.startsWith('J') || uRef.startsWith('CN') || uRef.startsWith('CON') || uRef.startsWith('BAT'));
+        const isNonShunt = kind !== COMPONENT_KINDS.UNKNOWN
+            ? isNonShuntKind(kind)
+            : isConnector;
 
-        // Exactly 2 pins, not a connector, and the other end is on GND
-        if (hasGndPin && pinCount === 2 && !isConnector) {
+        if (hasGndPin && pinCount === 2 && !isNonShunt) {
             return 'SHUNT_CAP';
         }
 
-        // 2. POWER AND SIGNAL SOURCES (SOURCES)
-        // External power, battery, and Type-C connectors
-        if (uRef.startsWith('JDC') || uRef.startsWith('DCIN') || uRef.startsWith('JBAT') ||
-            ((uRef.startsWith('J') || uRef.startsWith('CN')) &&
-                (uNet.includes('VIN') || uNet.includes('VBUS') || uNet.includes('DC') || uNet.includes('BAT')))) {
+        // 2. Power / Signal Sources
+        if (uRef.startsWith('JDC') || uRef.startsWith('DCIN') || uRef.startsWith('JBAT') || uRef.startsWith('EATXPWR') ||
+            (isConnector &&
+                (uNet.includes('VIN') || uNet.includes('VBUS') || uNet.includes('DC') || uNet.includes('BAT') || uNet.includes('12V') || uNet.includes('19V')))) {
             return 'SOURCE';
         }
 
-        // Power inductors (PL, L, HL):
         if (this.isInductor(uRef, comp)) {
             if (this.isInductorPowerSource(comp, pinNum, uNet)) {
                 return 'SOURCE';
             }
         }
 
-        // Power MOSFETs (PQ, Q, HQ): source or drain switching power
         if (this.isTransistor(uRef, comp)) {
             if (pinName !== '4' && pinName !== 'G' && !pinName.includes('GATE')) {
                 if (this.isMosfetPowerSource(comp, pinNum, uNet)) {
@@ -187,7 +236,6 @@ export class NetInspectorController {
             }
         }
 
-        // PWM and LDO ICs (PU, U, HU): output voltage pins
         if (this.isIc(uRef, comp)) {
             if (pinName.includes('OUT') || pinName.includes('VREG') || pinName.includes('LDO') ||
                 pinName.includes('SW') || pinName.includes('LX') || pinName.includes('PHASE')) {
@@ -195,22 +243,18 @@ export class NetInspectorController {
             }
         }
 
-        // 3. ACTIVE LOAD (LOAD)
+        // 3. Active Load
         if (this.isIc(uRef, comp) || uRef.startsWith('PCH') || uRef.startsWith('CPU') || uRef.startsWith('GPU') || uRef.startsWith('SOC')) {
             return 'LOAD';
         }
 
-        // 4. Other pass-through passive components
+        // 4. Other passives
         return 'PASSIVE';
     }
 
-    /**
-     * Checks whether ANY OTHER pin of this component is connected to a GND net
-     */
     hasGroundPin(uRef, comp, currentPinNum, gndPinsSet = null) {
         const curPinStr = String(currentPinNum || '').trim();
 
-        // 1. Check via comp.pins dictionary
         if (comp?.pins) {
             for (const [pKey, pVal] of Object.entries(comp.pins)) {
                 if (pKey === curPinStr || (curPinStr && pKey.equalsIgnoreCase(curPinStr))) continue;
@@ -226,7 +270,6 @@ export class NetInspectorController {
             }
         }
 
-        // 2. Fallback check for 2-pin parts using the board net registry
         if (gndPinsSet) {
             const otherPinNum = curPinStr === '1' ? '2' : (curPinStr === '2' ? '1' : null);
             if (otherPinNum && gndPinsSet.has(`${uRef}.${otherPinNum}`)) {
@@ -237,9 +280,6 @@ export class NetInspectorController {
         return false;
     }
 
-    /**
-     * Checks whether the inductor forms this power rail (PWM phase on the other side)
-     */
     isInductorPowerSource(comp, currentPinNum, currentNet) {
         if (!comp?.pins) return false;
         const curPinStr = String(currentPinNum);
@@ -258,9 +298,6 @@ export class NetInspectorController {
         return false;
     }
 
-    /**
-     * Checks whether the transistor switches power from a primary rail
-     */
     isMosfetPowerSource(comp, currentPinNum, currentNet) {
         if (!comp?.pins) return false;
         const curPinStr = String(currentPinNum);
@@ -277,25 +314,25 @@ export class NetInspectorController {
         return false;
     }
 
-    // Universal regexes supporting platform prefixes (H, P, V, M, S, A, T, E, B)
-
-
     isInductor(uRef, comp) {
-        if (comp?.type && /inductor|choke|coil/i.test(comp.type)) return true;
-        // Supports: L1, PL1, HL1, FL1, FB1, BLM1...
-        return /^(?:[A-Z]{0,2})?(?:PL|HL|VL|ML|SL|FL|FB|BL|L)\d+/i.test(uRef);
+        const kind = getComponentKind(comp);
+        if (kind !== COMPONENT_KINDS.UNKNOWN) return isInductorKind(kind);
+        return /^(?:[A-Z0-9]{1,4}_|[0-9][A-Z]|[A-Z][0-9])?(?:FB|BLM|FL|PL|HL|VL|ML|SL|L)\d+/i.test(uRef);
     }
 
     isTransistor(uRef, comp) {
-        if (comp?.type && /transistor|mosfet|fet/i.test(comp.type)) return true;
-        // Supports: Q1, PQ1, HQ1, VQ1, MQ1, QA1, VT1...
-        return /^(?:[A-Z]{0,2})?(?:PQ|HQ|VQ|MQ|SQ|QA|FET|VT|Q)\d+/i.test(uRef);
+        const kind = getComponentKind(comp);
+        if (kind !== COMPONENT_KINDS.UNKNOWN) return isTransistorKind(kind);
+        return /^(?:[A-Z0-9]{1,4}_|[0-9][A-Z]|[A-Z][0-9]|[A-Z]{0,2})?(?:PQ|HQ|VQ|MQ|SQ|QA|QC|QE|QI|QV|FET|VT|Q)\d+/i.test(uRef);
     }
 
     isIc(uRef, comp) {
-        if (comp?.type && /ic|controller|pwm|codec|processor/i.test(comp.type)) return true;
-        // Supports: U1, PU1, HU1, VU1, MU1, EU1, UA1, UE1, UI1...
-        return /^(?:[A-Z]{0,2})?(?:PU|HU|VU|MU|SU|EU|UA|UE|UI|IC|U)\d+/i.test(uRef);
+        const kind = getComponentKind(comp);
+        if (kind !== COMPONENT_KINDS.UNKNOWN) return isIcKind(kind);
+        if (/^FU\d+/i.test(uRef)) return false;
+        const pinCount = comp?.pinsCount > 0 ? comp.pinsCount : Object.keys(comp?.pins || {}).length;
+        if (pinCount > 0 && pinCount <= 2) return false;
+        return /^(?:[A-Z0-9]{1,4}_|[0-9][A-Z]|[A-Z][0-9]|[A-Z]{0,2})?(?:PU|HU|VU|MU|SU|EU|UA|UE|UI|DAU|CU|IC|U)\d+/i.test(uRef);
     }
 
     isShuntNode(role) {
@@ -303,17 +340,7 @@ export class NetInspectorController {
     }
 
     isGroundNet(netName) {
-        if (!netName) return false;
-        const u = netName.toUpperCase().trim();
-        // Exact match for Allegro / OrCAD / CST / GenCAD nets
-        if (u === '0' || u === '$0' || u === '0V' || u === 'GROUND' || u === 'GND' || u === 'EARTH') return true;
-
-        const tokens = u.split(/[_/\-. +]/);
-        return tokens.some(t =>
-            t === 'GND' || t === 'GROUND' || t === 'AGND' || t === 'PGND' ||
-            t === 'DGND' || t === 'SGND' || t === 'CGND' ||
-            t.startsWith('VSS') || t.endsWith('GND')
-        );
+        return isGroundNet(netName);
     }
 
     getSummary() {
@@ -345,10 +372,17 @@ export class NetInspectorController {
 
     isActiveComponent(refDes, comp = null) {
         if (!refDes) return false;
+        const kind = getComponentKind(comp);
+        if (kind !== COMPONENT_KINDS.UNKNOWN) {
+            return isActiveComponentKind(kind);
+        }
+
         const u = refDes.toUpperCase();
+        const pinCount = comp?.pinsCount > 0 ? comp.pinsCount : Object.keys(comp?.pins || {}).length;
 
         if (u.startsWith('VIA') || u.startsWith('TP') || u.startsWith('TEST') || u.startsWith('$') ||
-            u.startsWith('FID') || /^M?H\d+$/.test(u)) {
+            u.startsWith('FID') || u.startsWith('TB_TP') || /^M?H\d+$/.test(u) ||
+            (pinCount <= 2 && /^P?T\d+[A-Z]?$/.test(u))) {
             return false;
         }
 
@@ -356,10 +390,7 @@ export class NetInspectorController {
             return false;
         }
 
-        const role = (comp?.type || comp?.role || '').toUpperCase();
-        if (role.includes('RESISTOR') || role.includes('CAPACITOR') ||
-            role.includes('INDUCTOR') || role.includes('FUSE') ||
-            role.includes('MECHANICAL') || role.includes('JUMPER')) {
+        if (pinCount > 0 && pinCount <= 2) {
             return false;
         }
 
@@ -368,6 +399,7 @@ export class NetInspectorController {
 
     setFilter(filter) {
         this.activeFilter = filter;
+        this.syncCanvasStore();
     }
 
     renderNetOverlay(ctx, scale, toX, toY, matrix, requestRender = null) {
@@ -375,29 +407,117 @@ export class NetInspectorController {
 
         const curSide = (AppState.activeSide || 'TOP').toUpperCase();
         const isShuntFilter = (this.activeFilter === 'SHUNTS');
+        const isSourceFilter = (this.activeFilter === 'SOURCES');
+        const isGnd = this.isGroundNet(this.selectedNet);
         const now = Date.now();
         const pulse = Math.sin((now % 1000) / 1000 * Math.PI * 2);
 
-        ctx.save();
-        this.inspectedNodes.forEach(node => {
-            // Filter strictly by deduced role
-            if (isShuntFilter && !this.isShuntNode(node.role)) return;
-            if (this.activeFilter === 'SOURCES' && node.role !== 'SOURCE') return;
-            if (node.side !== curSide) return;
+        const dpr = window.devicePixelRatio || 1;
+        const margin = 40 / scale;
+        const viewLeft = -CanvasStore.panX / scale - margin;
+        const viewRight = (ctx.canvas.width / dpr - CanvasStore.panX) / scale + margin;
+        const viewTop = -CanvasStore.panY / scale - margin;
+        const viewBottom = (ctx.canvas.height / dpr - CanvasStore.panY) / scale + margin;
+
+        const filteredNodes = [];
+        const sameSideProjected = [];
+        const oppositeSideProjected = [];
+        let originProjected = null;
+
+        for (let i = 0; i < this.inspectedNodes.length; i++) {
+            const node = this.inspectedNodes[i];
+            if (isShuntFilter && !this.isShuntNode(node.role)) continue;
+            if (isSourceFilter && node.role !== 'SOURCE') continue;
 
             const norm = transformPoint(matrix, node.cadX, node.cadY);
             const px = toX(norm.x);
             const py = toY(norm.y);
-
-            const isClickedPin = this.selectedRefDes &&
+            const isClickedPin = !!(this.selectedRefDes &&
                 node.refDes.toUpperCase() === this.selectedRefDes &&
-                (!this.selectedPinNum || String(node.pinNum) === this.selectedPinNum);
+                (!this.selectedPinNum || String(node.pinNum) === this.selectedPinNum));
+
+            const proj = { node, px, py, isClickedPin };
+            filteredNodes.push(proj);
+            if (isClickedPin && !originProjected) originProjected = proj;
+
+            if (node.side === curSide) sameSideProjected.push(proj);
+            else oppositeSideProjected.push(proj);
+        }
+
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // 1. Real copper tracks or Ratsnest airwires for non-GND nets
+        if (!isGnd) {
+            if (this.netTracks.length > 0) {
+                this.renderRealNetTracks(ctx, scale, toX, toY, matrix, curSide);
+            } else if (filteredNodes.length >= 2 && filteredNodes.length <= MAX_RATSNEST_NODES) {
+                this.renderRatsnestAirwires(ctx, scale, filteredNodes, originProjected, curSide);
+            }
+        }
+
+        // 2. X-Ray Ghost nodes on the opposite side of the board
+        const shouldDrawXray = oppositeSideProjected.length > 0 &&
+            !(isGnd && this.activeFilter === 'ALL' && oppositeSideProjected.length > MAX_GND_XRAY_NODES);
+
+        if (shouldDrawXray) {
+            const showGhostLabels = !isGnd && oppositeSideProjected.length <= 24 && scale >= 3.5;
+            ctx.shadowBlur = 0;
+
+            for (const item of oppositeSideProjected) {
+                const { node, px, py } = item;
+                if (px < viewLeft || px > viewRight || py < viewTop || py > viewBottom) continue;
+
+                const isShunt = this.isShuntNode(node.role);
+                const isVia = (node.role === 'VIA');
+                let ringR = (isVia ? 5.5 : 7.4) / scale;
+                if (isShuntFilter && isShunt) ringR = (8.5 + pulse * 1.4) / scale;
+
+                const ringColor = isShunt ? 'rgba(232, 121, 249, 0.88)' : 'rgba(192, 132, 252, 0.82)';
+
+                ctx.fillStyle = isShunt ? 'rgba(217, 70, 239, 0.16)' : 'rgba(168, 85, 247, 0.15)';
+                ctx.beginPath();
+                ctx.arc(px, py, ringR, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.strokeStyle = ringColor;
+                ctx.lineWidth = 1.6 / scale;
+                ctx.setLineDash([3.2 / scale, 2.5 / scale]);
+                ctx.beginPath();
+                ctx.arc(px, py, ringR, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                ctx.fillStyle = 'rgba(233, 213, 255, 0.88)';
+                ctx.beginPath();
+                ctx.arc(px, py, 1.8 / scale, 0, Math.PI * 2);
+                ctx.fill();
+
+                if (showGhostLabels && node.refDes) {
+                    const fs = 8.0 / scale;
+                    ctx.font = `bold ${fs}px ${FONT_FAMILY}`;
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'bottom';
+                    ctx.fillStyle = 'rgba(233, 213, 255, 0.82)';
+                    const lbl = node.pinNum ? `${node.refDes}.${node.pinNum}` : node.refDes;
+                    ctx.fillText(lbl, px, py - ringR - (2.0 / scale));
+                }
+            }
+        }
+
+        // 3. Nodes on the active side
+        const useHeavyGlow = sameSideProjected.length <= 120;
+
+        for (const item of sameSideProjected) {
+            const { node, px, py, isClickedPin } = item;
+            if (px < viewLeft || px > viewRight || py < viewTop || py > viewBottom) continue;
 
             const isShunt = this.isShuntNode(node.role);
             const isSource = (node.role === 'SOURCE');
             const isVia = (node.role === 'VIA');
 
-            // SELECTED PIN UNDER CURSOR (GOLD RETICLE)
+            // Selected pin (gold target)
             if (isClickedPin) {
                 const ringRadius = (11.0 + pulse * 2.0) / scale;
 
@@ -426,11 +546,11 @@ export class NetInspectorController {
                 ctx.arc(px, py, 2.5 / scale, 0, Math.PI * 2);
                 ctx.fill();
 
-                return;
+                continue;
             }
 
-            // OTHER NET NODES (Shunts to ground = RED, Sources = GREEN)
-            let glowColor = isShunt ? '#ef4444' : (isSource ? '#22c55e' : '#00e5ff');
+            // Remaining net nodes (Shunts = red, Sources = green, Default = cyan)
+            const glowColor = isShunt ? '#ef4444' : (isSource ? '#22c55e' : '#00e5ff');
             let radius = (isVia ? 5.5 : 7.0) / scale;
 
             if (isShuntFilter && isShunt) {
@@ -443,8 +563,12 @@ export class NetInspectorController {
             ctx.arc(px, py, radius + (1.0 / scale), 0, Math.PI * 2);
             ctx.fill();
 
-            ctx.shadowColor = glowColor;
-            ctx.shadowBlur = (isShuntFilter && isShunt ? 18 : 12) / scale;
+            if (useHeavyGlow) {
+                ctx.shadowColor = glowColor;
+                ctx.shadowBlur = (isShuntFilter && isShunt ? 18 : 12) / scale;
+            } else {
+                ctx.shadowBlur = 0;
+            }
             ctx.fillStyle = glowColor;
             ctx.beginPath();
             ctx.arc(px, py, radius, 0, Math.PI * 2);
@@ -455,11 +579,132 @@ export class NetInspectorController {
             ctx.beginPath();
             ctx.arc(px, py, 2.0 / scale, 0, Math.PI * 2);
             ctx.fill();
-        });
+        }
         ctx.restore();
 
         if (requestRender) {
             requestAnimationFrame(() => requestRender());
         }
+    }
+
+    renderRealNetTracks(ctx, scale, toX, toY, matrix, curSide) {
+        ctx.save();
+        ctx.shadowBlur = 0;
+
+        for (const tr of this.netTracks) {
+            const layerRaw = String(tr.layer || curSide).toUpperCase();
+            const isTopLayer = layerRaw.startsWith('T') || layerRaw === 'L1' || layerRaw === '1';
+            const isBotLayer = layerRaw.startsWith('B');
+            const isSameSide = (curSide === 'TOP' && isTopLayer) || (curSide === 'BOTTOM' && isBotLayer) || layerRaw === 'BOTH';
+            const isOppositeSide = (curSide === 'TOP' && isBotLayer) || (curSide === 'BOTTOM' && isTopLayer);
+
+            ctx.beginPath();
+            const first = transformPoint(matrix, tr.path[0].x, tr.path[0].y);
+            ctx.moveTo(toX(first.x), toY(first.y));
+            for (let i = 1; i < tr.path.length; i++) {
+                const pt = transformPoint(matrix, tr.path[i].x, tr.path[i].y);
+                ctx.lineTo(toX(pt.x), toY(pt.y));
+            }
+
+            if (isSameSide) {
+                ctx.setLineDash([]);
+                ctx.strokeStyle = 'rgba(34, 211, 238, 0.55)';
+                ctx.lineWidth = 2.6 / scale;
+                ctx.stroke();
+
+                ctx.strokeStyle = 'rgba(165, 243, 252, 0.85)';
+                ctx.lineWidth = 1.1 / scale;
+                ctx.stroke();
+            } else if (isOppositeSide) {
+                ctx.setLineDash([4.0 / scale, 3.0 / scale]);
+                ctx.strokeStyle = 'rgba(192, 132, 252, 0.45)';
+                ctx.lineWidth = 1.6 / scale;
+                ctx.stroke();
+                ctx.setLineDash([]);
+            } else {
+                // Inner PCB copper layer
+                ctx.setLineDash([2.0 / scale, 3.0 / scale]);
+                ctx.strokeStyle = 'rgba(129, 140, 248, 0.45)';
+                ctx.lineWidth = 1.4 / scale;
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
+
+        ctx.restore();
+    }
+
+    renderRatsnestAirwires(ctx, scale, projectedNodes, originProjected, curSide) {
+        const edges = [];
+
+        if (originProjected) {
+            // Star topology from the clicked pin to every node on the net
+            for (const target of projectedNodes) {
+                if (target === originProjected) continue;
+                edges.push([originProjected, target]);
+            }
+        } else {
+            // Minimum Spanning Tree (Prim's algorithm) when selected from search
+            const n = projectedNodes.length;
+            const visited = new Uint8Array(n);
+            const minDist = new Float64Array(n).fill(Infinity);
+            const parent = new Int32Array(n).fill(-1);
+            minDist[0] = 0;
+
+            for (let step = 0; step < n; step++) {
+                let u = -1;
+                let best = Infinity;
+                for (let i = 0; i < n; i++) {
+                    if (!visited[i] && minDist[i] < best) {
+                        best = minDist[i];
+                        u = i;
+                    }
+                }
+                if (u === -1) break;
+                visited[u] = 1;
+                if (parent[u] !== -1) {
+                    edges.push([projectedNodes[parent[u]], projectedNodes[u]]);
+                }
+                const pu = projectedNodes[u];
+                for (let v = 0; v < n; v++) {
+                    if (visited[v]) continue;
+                    const pv = projectedNodes[v];
+                    const d = Math.hypot(pv.px - pu.px, pv.py - pu.py);
+                    if (d < minDist[v]) {
+                        minDist[v] = d;
+                        parent[v] = u;
+                    }
+                }
+            }
+        }
+
+        ctx.save();
+        ctx.shadowBlur = 0;
+
+        for (const [a, b] of edges) {
+            const bothSameSide = (a.node.side === curSide && b.node.side === curSide);
+            const isTargetShunt = this.isShuntNode(b.node.role) || this.isShuntNode(a.node.role);
+            const isTargetSource = (b.node.role === 'SOURCE' || a.node.role === 'SOURCE');
+
+            if (bothSameSide) {
+                ctx.setLineDash([]);
+                ctx.strokeStyle = isTargetSource
+                    ? 'rgba(74, 222, 128, 0.42)'
+                    : (isTargetShunt ? 'rgba(248, 113, 113, 0.36)' : 'rgba(34, 211, 238, 0.36)');
+                ctx.lineWidth = 1.25 / scale;
+            } else {
+                ctx.setLineDash([4.0 / scale, 3.5 / scale]);
+                ctx.strokeStyle = 'rgba(192, 132, 252, 0.36)';
+                ctx.lineWidth = 1.1 / scale;
+            }
+
+            ctx.beginPath();
+            ctx.moveTo(a.px, a.py);
+            ctx.lineTo(b.px, b.py);
+            ctx.stroke();
+        }
+
+        ctx.setLineDash([]);
+        ctx.restore();
     }
 }

@@ -88,6 +88,46 @@ body.calib-focus #ai-calibration-banner {
     will-change: transform;
 }
 
+.canvas-zoom-controls {
+    position: absolute;
+    right: max(0.75rem, env(safe-area-inset-right));
+    bottom: max(5.5rem, env(safe-area-inset-bottom));
+    z-index: 25;
+    display: flex;
+    align-items: center;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 0.75rem;
+    background: rgba(9, 14, 23, 0.92);
+    color: #fff;
+    font-size: 0.75rem;
+    cursor: default;
+}
+
+.canvas-zoom-controls button {
+    min-width: 40px;
+    min-height: 40px;
+    padding: 0 0.5rem;
+    color: inherit;
+    cursor: pointer;
+}
+
+.canvas-zoom-controls button:hover,
+.canvas-zoom-controls button:focus-visible {
+    background: rgba(255, 255, 255, 0.12);
+    outline: 2px solid #22d3ee;
+    outline-offset: -2px;
+}
+
+.canvas-zoom-controls output {
+    min-width: 3.5rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+body.zen-mode .canvas-zoom-controls {
+    display: none;
+}
+
 /* 3D BOARD FLIP ANIMATION (WORKBENCH DOES NOT MOVE) */
 .flip-animate {
     animation: quickBoardFlip 0.38s cubic-bezier(0.4, 0, 0.2, 1) forwards !important;

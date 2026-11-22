@@ -1,7 +1,11 @@
 ﻿// ============================================================================
-// FILE: wwwroot/js/engine/GestureController.js (VIZO 2.0 - High Performance 120 FPS)
+// FILE: wwwroot/js/engine/GestureController.js (VIZO BoardViewer - 120 FPS)
 // ============================================================================
 import { CanvasStore } from '../state/CanvasStore.js';
+import { AppEvents } from '../state/EventBus.js';
+import { CameraNavigator } from './CameraNavigator.js';
+
+const IGNORED_UI_SELECTOR = '#canvas-zoom-controls, #net-inspector-hud, #viewer-topbar, #viewer-spotlight-modal, #viewer-shortcuts-modal, #viewer-dropzone';
 
 export class GestureController {
     constructor(containerEl, onTransformChanged, engine) {
@@ -22,10 +26,38 @@ export class GestureController {
         this.initialWorldCenter = { x: 0, y: 0 };
         this.cachedRect = null;
         this.wheelEndTimeout = null;
+        this.tapCandidate = null;
+        this.lastTap = null;
+        this.lastTouchReset = 0;
+        this.zoomControls = containerEl.querySelector('#canvas-zoom-controls');
+        this.zoomValue = this.zoomControls?.querySelector('[data-zoom-value]');
 
+        AppEvents.on('canvas:scaleChanged', () => this.updateZoomValue());
+        this.updateZoomValue();
         this.updateCachedRect();
         window.addEventListener('resize', () => this.updateCachedRect());
         this.bindEvents();
+    }
+
+    updateZoomValue() {
+        if (this.zoomValue) this.zoomValue.textContent = `${Math.round(CanvasStore.scale * 100)}%`;
+    }
+
+    resetView() {
+        CameraNavigator.cancelGlide();
+        CanvasStore.resetTransform();
+        this.engine?.requestRender();
+    }
+
+    zoomAt(factor, x, y) {
+        CameraNavigator.cancelGlide();
+        const scale = CanvasStore.scale;
+        const next = Math.min(Math.max(1.0, scale * factor), 30.0);
+        if (next === scale) return;
+        const worldX = (x - CanvasStore.panX) / scale;
+        const worldY = (y - CanvasStore.panY) / scale;
+        CanvasStore.setTransform(next, x - worldX * next, y - worldY * next);
+        this.engine?.requestRender();
     }
 
     updateCachedRect() {
@@ -36,15 +68,33 @@ export class GestureController {
     }
 
     bindEvents() {
+        this.zoomControls?.addEventListener('click', (e) => {
+            const button = e.target.closest('[data-zoom]');
+            if (!button) return;
+            if (button.dataset.zoom === 'fit') {
+                this.resetView();
+            } else {
+                const rect = this.cachedRect || this.container.getBoundingClientRect();
+                this.zoomAt(button.dataset.zoom === 'in' ? 1.25 : 1 / 1.25, rect.width / 2, rect.height / 2);
+            }
+        });
+
+        this.container.addEventListener('dblclick', (e) => {
+            if (e.target !== this.engine?.canvas || CanvasStore.currentTool !== 'pan' || Date.now() - this.lastTouchReset < 700) return;
+            e.preventDefault();
+            this.resetView();
+        });
+
         // -------------------------------------------------------------
         // 1. MOUSE (DESKTOP)
         // -------------------------------------------------------------
         this.container.addEventListener('mousedown', (e) => {
             if (e.button !== 0 && e.button !== 1) return;
-            if (e.target.closest('#card-mode, #search-mode, #ai-status, #lang-menu, #pdf-modal, #file-badge, #left-toolbar, #pwa-install-banner, #repairs-dropdown-menu')) return;
+            if (e.target.closest(IGNORED_UI_SELECTOR)) return;
 
             if (CanvasStore.currentTool !== 'pan' && e.button === 0) return;
 
+            CameraNavigator.cancelGlide();
             this.isMouseDragging = true;
             this.mouseStartX = e.clientX;
             this.mouseStartY = e.clientY;
@@ -77,17 +127,31 @@ export class GestureController {
         // 2. SMARTPHONE / TABLET (Touch)
         // -------------------------------------------------------------
         this.container.addEventListener('touchstart', (e) => {
-            if (e.target.closest('#card-mode, #search-mode, #ai-status, #lang-menu, #pdf-modal, #file-badge, #left-toolbar, #pwa-install-banner, #repairs-dropdown-menu')) return;
+            if (e.target.closest(IGNORED_UI_SELECTOR)) {
+                this.tapCandidate = null;
+                this.lastTap = null;
+                return;
+            }
+
+            if (e.touches.length === 1 && e.target === this.engine?.canvas && CanvasStore.currentTool === 'pan') {
+                const touch = e.touches[0];
+                this.tapCandidate = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+            } else {
+                this.tapCandidate = null;
+                this.lastTap = null;
+            }
 
             const rect = this.cachedRect || this.container.getBoundingClientRect();
 
             if (e.touches.length === 1 && CanvasStore.currentTool === 'pan') {
+                CameraNavigator.cancelGlide();
                 this.touchMode = 'pan';
                 this.touchStartX = e.touches[0].clientX;
                 this.touchStartY = e.touches[0].clientY;
                 this.initialPanX = CanvasStore.panX;
                 this.initialPanY = CanvasStore.panY;
             } else if (e.touches.length >= 2) {
+                CameraNavigator.cancelGlide();
                 e.preventDefault();
                 this.touchMode = 'pinch';
                 CanvasStore.setInteracting(true);
@@ -106,6 +170,10 @@ export class GestureController {
         }, { passive: false });
 
         this.container.addEventListener('touchmove', (e) => {
+            if (this.tapCandidate && (e.touches.length !== 1 || Math.hypot(e.touches[0].clientX - this.tapCandidate.x, e.touches[0].clientY - this.tapCandidate.y) > 8)) {
+                this.tapCandidate = null;
+                this.lastTap = null;
+            }
             if (!this.touchMode) return;
             const rect = this.cachedRect || this.container.getBoundingClientRect();
 
@@ -134,6 +202,22 @@ export class GestureController {
         }, { passive: false });
 
         const onTouchEnd = (e) => {
+            if (e.touches.length === 0 && this.tapCandidate) {
+                const tap = this.tapCandidate;
+                const now = Date.now();
+                if (e.type === 'touchend' && now - tap.time <= 300) {
+                    if (this.lastTap && now - this.lastTap.time <= 350 && Math.hypot(tap.x - this.lastTap.x, tap.y - this.lastTap.y) <= 25) {
+                        this.lastTap = null;
+                        this.lastTouchReset = now;
+                        this.resetView();
+                    } else {
+                        this.lastTap = { x: tap.x, y: tap.y, time: now };
+                    }
+                } else {
+                    this.lastTap = null;
+                }
+                this.tapCandidate = null;
+            }
             if (e.touches.length === 0) {
                 this.touchMode = null;
                 CanvasStore.setInteracting(false);
@@ -154,10 +238,10 @@ export class GestureController {
         // 3. MOUSE WHEEL (DESKTOP ZOOM) - With Fast-Path mode
         // -------------------------------------------------------------
         window.addEventListener('wheel', (e) => {
-            if (e.target.closest('#card-mode, #search-mode, #ai-status, #lang-menu, #pdf-modal, #file-badge, #left-toolbar, #pwa-install-banner, #repairs-dropdown-menu')) return;
+            if (e.target.closest(IGNORED_UI_SELECTOR)) return;
             e.preventDefault();
+            CameraNavigator.cancelGlide();
 
-            // Enable fast render mode (disable heavy shadows)
             CanvasStore.setInteracting(true);
 
             if (this.wheelEndTimeout) clearTimeout(this.wheelEndTimeout);
@@ -168,18 +252,7 @@ export class GestureController {
 
             const rect = this.cachedRect || this.container.getBoundingClientRect();
             const factor = e.deltaY < 0 ? 1.15 : 0.85;
-            const newScale = Math.min(Math.max(1.0, CanvasStore.scale * factor), 30.0);
-
-            if (newScale !== CanvasStore.scale) {
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
-
-                const worldX = (mouseX - CanvasStore.panX) / CanvasStore.scale;
-                const worldY = (mouseY - CanvasStore.panY) / CanvasStore.scale;
-
-                CanvasStore.setTransform(newScale, mouseX - (worldX * newScale), mouseY - (worldY * newScale));
-                this.engine?.requestRender();
-            }
+            this.zoomAt(factor, e.clientX - rect.left, e.clientY - rect.top);
         }, { passive: false });
     }
 }

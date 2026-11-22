@@ -33,10 +33,12 @@ Download a single-file build for your OS from [**GitHub Releases**](../../releas
 
 ## Features
 
-- **Zero dependencies** — single self-contained executable with embedded frontend assets.
-- **Fast HTML5 Canvas rendering** — smooth pan, zoom, and high-DPI board inspection.
-- **Dual-side & net inspection** — flip sides, highlight nets, and locate components/pins.
-- **Desktop & touch support** — mouse/keyboard shortcuts plus pinch-zoom and touch gestures.
+- **Zero dependencies** — single self-contained executable with embedded frontend assets and component catalog.
+- **19-class offline component database** — embedded catalog of 5,500+ real RefDes/pin signatures from 1,175 boards plus pin-aware heuristics for color-coded engineering rendering.
+- **Fast HTML5 Canvas rendering** — 120 FPS pan/zoom, adaptive pitch-scaled pads, gold square **Pin 1** indicators, and on-canvas zoom controls (`− / + / Fit`).
+- **Advanced Net Inspector** — background **Net Dimming**, real copper traces (`tracks`) or **Ratsnest** airwires, **X-Ray Ghost** reverse-side nodes, and Shunt / Source filtering.
+- **Rich Hover HUD** — live component & pad highlighting, component role badge, BOM summary, color-coded net pills (`GND`, `POWER`, `SIGNAL`, `NC`), and neighbor pins.
+- **Dual-side & touch support** — 3D layer flip, 90° rotation/mirroring, Spotlight search, mouse/keyboard shortcuts, and pinch-zoom / double-tap touch gestures.
 
 ---
 

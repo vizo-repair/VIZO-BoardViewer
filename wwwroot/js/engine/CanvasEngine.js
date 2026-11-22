@@ -1,5 +1,5 @@
 ﻿// ============================================================================
-// FILE: wwwroot/js/engine/CanvasEngine.js (VIZO 2.0 - 120 FPS Unified Scheduler)
+// FILE: wwwroot/js/engine/CanvasEngine.js (VIZO BoardViewer - 120 FPS Engine)
 // ============================================================================
 import { CanvasStore } from '../state/CanvasStore.js';
 import { AppState, AppEvents } from '../state/AppState.js';
@@ -7,6 +7,13 @@ import { GestureController } from './GestureController.js';
 import { drawFrame, getImageRenderRect } from './CanvasRenderer.js';
 import { findNearestCadComponent } from './SnapEngine.js';
 import { t } from '../ui/i18n/I18nStore.js';
+import { formatComponentRole } from '../ui/i18n/DisplayLabels.js';
+import {
+    COMPONENT_KINDS,
+    normalizeComponentKind,
+    getComponentKindStyle,
+    classifyNetKind
+} from './ComponentKind.js';
 
 const FONT_FAMILY = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
 
@@ -22,6 +29,7 @@ export class CanvasEngine {
         this.hoverHit = null;
         this.hoverScreenPos = { x: 0, y: 0 };
         this.lastCanvasPos = null;
+        this.afterFrameRender = null;
 
         this.cachedCanvasRect = null;
 
@@ -77,9 +85,6 @@ export class CanvasEngine {
         this.canvas.addEventListener('pointerdown', (e) => {
             try { this.canvas.setPointerCapture(e.pointerId); } catch (_) { }
 
-            const r = this.cachedCanvasRect || this.canvas.getBoundingClientRect();
-            const screenX = e.clientX - r.left;
-            const screenY = e.clientY - r.top;
             const pos = getPos(e);
             this.lastCanvasPos = pos;
 
@@ -140,14 +145,21 @@ export class CanvasEngine {
     }
 
     renderImmediate() {
+        const activeHoverHit = (this.hoverHit && !CanvasStore.isInteracting) ? this.hoverHit : null;
+
         drawFrame(
             this.ctx,
             this.canvas,
             this.container,
-            () => this.requestRender()
+            () => this.requestRender(),
+            { hoverHit: activeHoverHit }
         );
 
-        if (this.hoverHit && !CanvasStore.isInteracting) {
+        if (typeof this.afterFrameRender === 'function') {
+            this.afterFrameRender();
+        }
+
+        if (activeHoverHit) {
             this.renderHoverTooltip();
         }
     }
@@ -164,7 +176,7 @@ export class CanvasEngine {
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
 
-        // Draw crisp yellow target dot directly on the snapped board pin
+        // Target dot on the snapped board pin
         if (hit.isPinSnapped && Number.isFinite(hit.snappedX) && Number.isFinite(hit.snappedY)) {
             const imgRect = getImageRenderRect(this.container);
             const canvasX = imgRect.offsetX + (hit.snappedX * imgRect.renderWidth);
@@ -172,84 +184,96 @@ export class CanvasEngine {
             const pinScreenX = Math.round((canvasX * CanvasStore.scale + CanvasStore.panX) * dpr);
             const pinScreenY = Math.round((canvasY * CanvasStore.scale + CanvasStore.panY) * dpr);
 
-            const ringRadius = 10.0 * dpr;
+            const ringRadius = 9.0 * dpr;
 
-            // 1. Dark backing (so the dot is clearly visible on any soldermask color)
             ctx.shadowBlur = 0;
             ctx.fillStyle = '#07090e';
             ctx.beginPath();
-            ctx.arc(pinScreenX, pinScreenY, ringRadius + 2.0 * dpr, 0, Math.PI * 2);
+            ctx.arc(pinScreenX, pinScreenY, ringRadius + 1.8 * dpr, 0, Math.PI * 2);
             ctx.fill();
 
-            // 2. Glowing yellow outer ring
             ctx.strokeStyle = '#facc15';
-            ctx.lineWidth = 2.4 * dpr;
+            ctx.lineWidth = 2.2 * dpr;
             ctx.shadowColor = '#facc15';
-            ctx.shadowBlur = 14 * dpr;
+            ctx.shadowBlur = 12 * dpr;
             ctx.beginPath();
             ctx.arc(pinScreenX, pinScreenY, ringRadius, 0, Math.PI * 2);
             ctx.stroke();
 
-            // 3. Yellow inner core
             ctx.fillStyle = '#facc15';
             ctx.beginPath();
-            ctx.arc(pinScreenX, pinScreenY, 5.5 * dpr, 0, Math.PI * 2);
+            ctx.arc(pinScreenX, pinScreenY, 4.8 * dpr, 0, Math.PI * 2);
             ctx.fill();
 
-            // 4. White center dot (focus)
             ctx.shadowBlur = 0;
             ctx.fillStyle = '#ffffff';
             ctx.beginPath();
-            ctx.arc(pinScreenX, pinScreenY, 2.2 * dpr, 0, Math.PI * 2);
+            ctx.arc(pinScreenX, pinScreenY, 2.0 * dpr, 0, Math.PI * 2);
             ctx.fill();
         }
 
-        // --- Tooltip label rendering ---
         const effectiveRef = hit.displayRefDes || hit.refDes;
-        const infoText = hit.value || hit.description || hit.partNumber || null;
+        const kind = normalizeComponentKind(hit.type);
+        const kindStyle = getComponentKindStyle(kind);
+        const kindAccent = (kind !== COMPONENT_KINDS.UNKNOWN && kind !== COMPONENT_KINDS.MECHANICAL)
+            ? kindStyle.fg
+            : '#38bdf8';
+        const roleText = (hit.type && kind !== COMPONENT_KINDS.UNKNOWN)
+            ? formatComponentRole(hit.type)
+            : (hit.isTestPoint ? formatComponentRole(hit.type) : '');
+        const bomText = formatBomSummary(hit, effectiveRef);
 
         if (hit.isPinSnapped && hit.snappedPin) {
             const pinHeader = `${effectiveRef}.${hit.snappedPin}`;
-            const netHeader = hit.net && !hit.net.toUpperCase().startsWith('NC') ? hit.net : t('netUnconnected', 'UNCONNECTED');
-
-            let descLine = null;
-            if (infoText && !infoText.equalsIgnoreCase(effectiveRef)) {
-                descLine = infoText.length > 75 ? infoText.substring(0, 72) + '...' : infoText;
-            }
+            const roleSegment = roleText ? ` (${roleText})` : '';
+            const netKind = classifyNetKind(hit.net);
+            const netBadgeText = netKind === 'NC'
+                ? t('pinTypeNc', 'NC')
+                : hit.net.trim();
 
             const otherPins = (hit.allPins || [])
                 .filter(p => String(p.pin) !== String(hit.snappedPin))
                 .slice(0, 4);
 
             const fontSizeTitle = 11.5 * dpr;
-            const fontSizeBody = 10.5 * dpr;
-            const padX = 12 * dpr;
+            const fontSizeRole = 10.2 * dpr;
+            const fontSizeBadge = 9.8 * dpr;
+            const fontSizeBody = 10.3 * dpr;
+            const padX = 11 * dpr;
             const padY = 8 * dpr;
-            const lineHeight = 15 * dpr;
+            const lineHeight = 15.5 * dpr;
+            const dotGap = 11 * dpr;
 
             ctx.font = `bold ${fontSizeTitle}px ${FONT_FAMILY}`;
-            let maxW = ctx.measureText(`🎯 ${pinHeader} • ${netHeader}`).width;
+            const headerW = ctx.measureText(pinHeader).width;
+            ctx.font = `${fontSizeRole}px ${FONT_FAMILY}`;
+            const roleW = roleSegment ? ctx.measureText(roleSegment).width : 0;
+            const badgeMetrics = measureNetBadge(ctx, netBadgeText, fontSizeBadge, dpr);
 
-            if (descLine) {
-                ctx.font = `${fontSizeBody}px ${FONT_FAMILY}`;
-                maxW = Math.max(maxW, ctx.measureText(`ℹ️ ${descLine}`).width);
+            let maxW = dotGap + headerW + roleW + (8 * dpr) + badgeMetrics.w;
+
+            if (bomText) {
+                ctx.font = `600 ${fontSizeBody}px ${FONT_FAMILY}`;
+                maxW = Math.max(maxW, ctx.measureText(bomText).width);
             }
 
             ctx.font = `bold ${fontSizeBody}px ${FONT_FAMILY}`;
             for (const op of otherPins) {
-                maxW = Math.max(maxW, ctx.measureText(`${op.pin}: ${op.net}`).width + 10 * dpr);
+                const opKind = classifyNetKind(op.net);
+                const opNetText = opKind === 'NC' ? t('pinTypeNc', 'NC') : op.net;
+                maxW = Math.max(maxW, ctx.measureText(`${op.pin}: ${opNetText}`).width + 14 * dpr);
             }
 
             const tagW = Math.ceil(maxW) + padX * 2;
-            let totalLines = 1 + (descLine ? 1 : 0) + (otherPins.length > 0 ? (otherPins.length + 0.5) : 0);
+            const totalLines = 1 + (bomText ? 1 : 0) + (otherPins.length > 0 ? (otherPins.length + 0.5) : 0);
             const tagH = Math.ceil(totalLines * lineHeight) + padY * 2;
 
             const posX = Math.min((this.canvas.width - tagW - 16), Math.max(16, sx * dpr + 20 * dpr));
             const posY = Math.max(16, Math.min(this.canvas.height - tagH - 16, sy * dpr - (tagH / 2)));
 
-            ctx.fillStyle = 'rgba(7, 12, 24, 0.94)';
+            ctx.fillStyle = 'rgba(7, 12, 24, 0.95)';
             ctx.strokeStyle = '#22d3ee';
-            ctx.lineWidth = 1.4 * dpr;
+            ctx.lineWidth = 1.3 * dpr;
             ctx.shadowColor = 'rgba(6, 182, 212, 0.35)';
             ctx.shadowBlur = 12 * dpr;
 
@@ -260,26 +284,41 @@ export class CanvasEngine {
             ctx.stroke();
 
             ctx.shadowBlur = 0;
-            let curY = posY + padY + (fontSizeTitle * 0.85);
+            let curY = posY + padY + (fontSizeTitle * 0.62);
+
+            // Component class indicator dot
+            ctx.fillStyle = kindAccent;
+            ctx.beginPath();
+            ctx.arc(posX + padX + 3.5 * dpr, curY, 3.5 * dpr, 0, Math.PI * 2);
+            ctx.fill();
 
             ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            let curX = posX + padX + dotGap;
+
             ctx.font = `bold ${fontSizeTitle}px ${FONT_FAMILY}`;
-            ctx.fillStyle = '#38bdf8';
-            ctx.fillText(`🎯 ${pinHeader}`, posX + padX, curY);
+            ctx.fillStyle = '#f8fafc';
+            ctx.fillText(pinHeader, curX, curY);
+            curX += headerW;
 
-            const pinHeadW = ctx.measureText(`🎯 ${pinHeader} `).width;
-            ctx.fillStyle = '#ffffff';
-            ctx.fillText(`• ${netHeader}`, posX + padX + pinHeadW, curY);
-
-            if (descLine) {
-                curY += lineHeight;
-                ctx.font = `${fontSizeBody}px ${FONT_FAMILY}`;
+            if (roleSegment) {
+                ctx.font = `${fontSizeRole}px ${FONT_FAMILY}`;
                 ctx.fillStyle = '#94a3b8';
-                ctx.fillText(`ℹ️ ${descLine}`, posX + padX, curY);
+                ctx.fillText(roleSegment, curX, curY);
+                curX += roleW;
+            }
+
+            drawNetBadge(ctx, curX + 8 * dpr, curY, netBadgeText, netKind, fontSizeBadge, dpr);
+
+            if (bomText) {
+                curY += lineHeight;
+                ctx.font = `600 ${fontSizeBody}px ${FONT_FAMILY}`;
+                ctx.fillStyle = '#cbd5e1';
+                ctx.fillText(bomText, posX + padX, curY);
             }
 
             if (otherPins.length > 0) {
-                curY += lineHeight * 0.4;
+                curY += lineHeight * 0.55;
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
                 ctx.lineWidth = 1 * dpr;
                 ctx.beginPath();
@@ -287,16 +326,19 @@ export class CanvasEngine {
                 ctx.lineTo(posX + tagW - padX, curY);
                 ctx.stroke();
 
-                curY += lineHeight * 0.7;
+                curY += lineHeight * 0.72;
                 ctx.font = `${fontSizeBody}px ${FONT_FAMILY}`;
 
                 for (const op of otherPins) {
+                    const opPinLabel = `${op.pin}:`;
                     ctx.fillStyle = '#64748b';
-                    ctx.fillText(`${op.pin}:`, posX + padX, curY);
+                    ctx.fillText(opPinLabel, posX + padX, curY);
 
-                    const isGnd = op.net.toUpperCase().includes('GND');
-                    ctx.fillStyle = isGnd ? '#94a3b8' : '#e2e8f0';
-                    ctx.fillText(op.net, posX + padX + (18 * dpr), curY);
+                    const opKind = classifyNetKind(op.net);
+                    const displayNet = opKind === 'NC' ? t('pinTypeNc', 'NC') : op.net;
+                    ctx.fillStyle = getNetTextColor(opKind);
+                    const pinColOffset = Math.max(20 * dpr, ctx.measureText(opPinLabel).width + 6 * dpr);
+                    ctx.fillText(displayNet, posX + padX + pinColOffset, curY);
                     curY += lineHeight;
                 }
             }
@@ -305,44 +347,175 @@ export class CanvasEngine {
             return;
         }
 
-        let label = `🎯 ${effectiveRef}`;
-        if (infoText) {
-            label += ` • ${infoText}`;
-        } else if (hit.type && hit.type !== 'IC') {
-            label += ` (${hit.type})`;
-        }
+        // Hover card for component body or testpoint / VIA
+        const roleSegment = roleText ? ` (${roleText})` : '';
+        const hasNet = hit.isTestPoint || (hit.net && hit.net.trim().length > 0);
+        const netKind = hasNet ? classifyNetKind(hit.net) : null;
+        const netBadgeText = hasNet
+            ? (netKind === 'NC' ? t('pinTypeNc', 'NC') : hit.net.trim())
+            : '';
 
-        if (label.length > 60) label = label.substring(0, 57) + '...';
+        const fontSizeTitle = 11.5 * dpr;
+        const fontSizeSub = 10.2 * dpr;
+        const fontSizeBadge = 9.8 * dpr;
+        const padX = 11 * dpr;
+        const padY = 6.5 * dpr;
+        const dotGap = 11 * dpr;
 
-        const fontSize = 11.5 * dpr;
-        ctx.font = `bold ${fontSize}px ${FONT_FAMILY}`;
-        const tw = ctx.measureText(label).width;
-        const padX = 10 * dpr;
-        const padY = 5 * dpr;
-        const tagW = Math.ceil(tw) + padX * 2;
-        const tagH = fontSize + padY * 2;
+        ctx.font = `bold ${fontSizeTitle}px ${FONT_FAMILY}`;
+        const refW = ctx.measureText(effectiveRef).width;
+        ctx.font = `${fontSizeSub}px ${FONT_FAMILY}`;
+        const roleW = roleSegment ? ctx.measureText(roleSegment).width : 0;
+
+        const inlineBom = bomText && bomText.length <= 28 ? ` • ${bomText}` : '';
+        const secondLineBom = bomText && bomText.length > 28 ? bomText : '';
+        const inlineBomW = inlineBom ? ctx.measureText(inlineBom).width : 0;
+        const badgeMetrics = hasNet ? measureNetBadge(ctx, netBadgeText, fontSizeBadge, dpr) : { w: 0, h: 0 };
+
+        let row1W = dotGap + refW + roleW + inlineBomW + (hasNet ? (8 * dpr + badgeMetrics.w) : 0);
+        let row2W = secondLineBom ? ctx.measureText(secondLineBom).width : 0;
+
+        const lineHeight = 15 * dpr;
+        const tagW = Math.ceil(Math.max(row1W, row2W)) + padX * 2;
+        const tagH = Math.ceil((secondLineBom ? lineHeight * 2 : lineHeight) + padY * 2);
 
         const posX = Math.min((this.canvas.width - tagW - 14), Math.max(14, sx * dpr + 18 * dpr));
         const posY = Math.max(14, sy * dpr - tagH - 12 * dpr);
 
-        ctx.fillStyle = 'rgba(7, 12, 24, 0.94)';
-        ctx.strokeStyle = '#38bdf8';
+        ctx.fillStyle = 'rgba(7, 12, 24, 0.95)';
+        ctx.strokeStyle = kindAccent;
         ctx.lineWidth = 1.2 * dpr;
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.65)';
         ctx.shadowBlur = 10 * dpr;
 
         ctx.beginPath();
-        if (ctx.roundRect) ctx.roundRect(posX, posY, tagW, tagH, 5 * dpr);
+        if (ctx.roundRect) ctx.roundRect(posX, posY, tagW, tagH, 6 * dpr);
         else ctx.rect(posX, posY, tagW, tagH);
         ctx.fill();
         ctx.stroke();
 
-        ctx.fillStyle = '#ffffff';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
         ctx.shadowBlur = 0;
-        ctx.fillText(label, posX + tagW / 2, posY + tagH / 2);
+        const row1Y = posY + padY + lineHeight * 0.5;
+
+        ctx.fillStyle = kindAccent;
+        ctx.beginPath();
+        ctx.arc(posX + padX + 3.5 * dpr, row1Y, 3.5 * dpr, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        let curX = posX + padX + dotGap;
+
+        ctx.font = `bold ${fontSizeTitle}px ${FONT_FAMILY}`;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(effectiveRef, curX, row1Y);
+        curX += refW;
+
+        if (roleSegment) {
+            ctx.font = `${fontSizeSub}px ${FONT_FAMILY}`;
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillText(roleSegment, curX, row1Y);
+            curX += roleW;
+        }
+
+        if (inlineBom) {
+            ctx.font = `600 ${fontSizeSub}px ${FONT_FAMILY}`;
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillText(inlineBom, curX, row1Y);
+            curX += inlineBomW;
+        }
+
+        if (hasNet) {
+            drawNetBadge(ctx, curX + 8 * dpr, row1Y, netBadgeText, netKind, fontSizeBadge, dpr);
+        }
+
+        if (secondLineBom) {
+            const row2Y = row1Y + lineHeight;
+            ctx.font = `600 ${fontSizeSub}px ${FONT_FAMILY}`;
+            ctx.fillStyle = '#cbd5e1';
+            ctx.fillText(secondLineBom, posX + padX, row2Y);
+        }
 
         ctx.restore();
     }
+}
+
+function formatBomSummary(hit, effectiveRef) {
+    if (!hit) return null;
+    const refUpper = (effectiveRef || '').trim().toUpperCase();
+    const parts = [];
+
+    const val = (hit.value || '').trim();
+    const pkg = (hit.package || '').trim();
+    const pn = (hit.partNumber || '').trim();
+    const desc = (hit.description || '').trim();
+
+    if (val && val.toUpperCase() !== refUpper) {
+        parts.push(val);
+    }
+    if (pkg && pkg.toUpperCase() !== refUpper &&
+        !parts.some(p => p.toUpperCase().includes(pkg.toUpperCase()))) {
+        parts.push(pkg);
+    }
+    if (parts.length === 0 && pn && pn.toUpperCase() !== refUpper) {
+        parts.push(pn);
+    }
+    if (parts.length === 0 && desc && desc.toUpperCase() !== refUpper && !hit.isTestPoint) {
+        parts.push(desc);
+    }
+
+    if (parts.length === 0) return null;
+    const joined = parts.join(' ');
+    return joined.length > 68 ? joined.slice(0, 65) + '...' : joined;
+}
+
+function getNetBadgePalette(netKind) {
+    if (netKind === 'GND') {
+        return { bg: 'rgba(56, 114, 168, 0.35)', border: '#60a5fa', text: '#bae6fd' };
+    }
+    if (netKind === 'NC') {
+        return { bg: 'rgba(51, 65, 85, 0.55)', border: '#64748b', text: '#94a3b8' };
+    }
+    if (netKind === 'POWER') {
+        return { bg: 'rgba(249, 115, 22, 0.24)', border: '#fb923c', text: '#fed7aa' };
+    }
+    return { bg: 'rgba(6, 182, 212, 0.22)', border: '#22d3ee', text: '#a5f3fc' };
+}
+
+function getNetTextColor(netKind) {
+    if (netKind === 'GND') return '#7dd3fc';
+    if (netKind === 'NC') return '#64748b';
+    if (netKind === 'POWER') return '#fdba74';
+    return '#e2e8f0';
+}
+
+function measureNetBadge(ctx, text, fontSize, dpr) {
+    ctx.font = `bold ${fontSize}px ${FONT_FAMILY}`;
+    const tw = ctx.measureText(text).width;
+    return {
+        w: Math.ceil(tw + 10 * dpr),
+        h: Math.ceil(fontSize + 5 * dpr)
+    };
+}
+
+function drawNetBadge(ctx, x, centerY, text, netKind, fontSize, dpr) {
+    const pal = getNetBadgePalette(netKind);
+    const { w, h } = measureNetBadge(ctx, text, fontSize, dpr);
+    const y = centerY - h / 2;
+
+    ctx.fillStyle = pal.bg;
+    ctx.strokeStyle = pal.border;
+    ctx.lineWidth = 1.0 * dpr;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 4 * dpr);
+    else ctx.rect(x, y, w, h);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = `bold ${fontSize}px ${FONT_FAMILY}`;
+    ctx.fillStyle = pal.text;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x + w / 2, centerY);
+    ctx.textAlign = 'left';
 }
